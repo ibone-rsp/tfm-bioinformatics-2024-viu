@@ -1,0 +1,207 @@
+---
+title: "Comparación entre datasets y obtención de proteínas consistentes"
+output: html_notebook
+---
+
+# Cargar las librerías necesarias
+```{r}
+library(plyr)
+library(tidyverse)
+library(gplots)
+library(pheatmap)
+library(gridExtra)
+library(VennDiagram)
+library(RColorBrewer)
+library(ggseqlogo)
+library(grid)
+library(futile.logger)
+library(dplyr)
+```
+
+#Crear un dataframe para cada experimento (dataset)
+```{r}
+exp_1 <- read.csv2("../resultados_analisis_individual/dataset1_mean.csv")
+exp_2 <- read.csv2("../resultados_analisis_individual/dataset2_mean.csv")
+exp_4 <- read.csv2("../resultados_analisis_individual/dataset4_mean.csv")
+```
+
+# Diagrama de Venn para Proteínas Comunes:
+```{r}
+# Configurar colores utilizando una paleta de RColorBrewer
+colors <- brewer.pal(3, "Oranges")
+
+# Cargar los experimentos
+experiments <- list(
+  Exp1 = exp_1$Protein.IDs,
+  Exp2 = exp_2$Protein.IDs,
+  Exp4 = exp_4$Protein.IDs
+)
+
+# Configurar diagrama de Venn
+venn.plot <- venn.diagram(
+  x = experiments,
+  category.names = c("Dataset 1", "Dataset 2", "Dataset 4"),
+  filename = NULL,
+  output = TRUE,
+  imagetype = "png", 
+  height = 3000, 
+  width = 3000, 
+  resolution = 300,
+  col = "black",
+  fill = colors,
+  alpha = 0.5,                    # Transparencia de los círculos
+  cat.col = colors,               # Color de los textos de categorías
+  cat.cex = 1.5,                  # Tamaño de los textos de categorías
+  cat.fontface = "bold",          # Estilo de fuente
+  cat.dist = c(0.05, 0.05, 0.05), # Ajuste de la posición de las etiquetas
+  cex = 1.5,                      # Tamaño del texto dentro de los círculos
+  fontfamily = "sans",            # Familia de la fuente
+  fontface = "bold"               # Estilo de la fuente
+)
+
+# Guardar el diagrama de Venn en un archivo PNG
+png(filename = "../datos finales/diagrama_venn.png", width = 3000, height = 3000, res = 300)
+grid.draw(venn.plot)
+dev.off()
+
+# Mostrar el diagrama de Venn en la ventana de gráficos de RStudio
+grid.newpage()
+grid.draw(venn.plot)
+```
+
+# Crear un archivo que solo contenga los IDs y las medias de las proteínas
+# comunes de los experimentos
+```{r}
+# Obtener las proteínas comunes identificadas en el diagrama de Venn
+proteinas_comunes <- calculate.overlap(x = experiments)$a5
+
+# Crear dataframe vacío
+data_comunes <- data.frame()
+
+for (p in proteinas_comunes) {
+  # Obtener la celda mean_of_means de la proteína actual para cada experimento
+  mean_exp1 <- exp_1[exp_1$Protein.IDs == p, "mean_of_means"]
+  mean_exp2 <- exp_2[exp_2$Protein.IDs == p, "mean_of_means"]
+  mean_exp4 <- exp_4[exp_4$Protein.IDs == p, "mean_of_means"]
+  
+  # Añadir fila con los datos obtenidos de la proteína actual
+  row <- data.frame(
+    Protein.IDs = p,
+    mean_exp1 = mean_exp1,
+    mean_exp2 = mean_exp2,
+    mean_exp4 = mean_exp4
+  )
+  data_comunes <- rbind(data_comunes, row)
+}
+```
+
+
+# Normalizacion respecto a la expresión de proteina "housekeeping"
+# tubulina -> Protein ID: AT5G62690
+```{r}
+housekeeping_normalize <- function(df) {
+  # Obtener columnas que empiecen por "mean_"
+  cols_selected <- grep("^mean_", names(df), value = TRUE)
+  # Obtener columnas que no empiecen por "mean_of_means"
+  cols_selected <- grep("^mean_of_means", cols_selected, value = TRUE,
+                        invert = TRUE)
+  
+  for (col in cols_selected) {
+    # Identificar el valor de mean_of_means de la tubulina en cada experimento
+    tubulin_exp <- df[df$Protein.IDs == "AT5G62690.1|", col]
+    # Normalizar los valores dividiendo por el valor de la tubulina
+    df[[paste0("norm_", col)]] <- df[,col] / tubulin_exp
+  }
+  return(df)
+}
+
+exp_1 <- housekeeping_normalize(exp_1)
+exp_2 <- housekeeping_normalize(exp_2)
+exp_4 <- housekeeping_normalize(exp_4)
+```
+
+# Agrupar datos en un solo dataframe, según requerimientos de ANOVA
+```{r}
+add_intensity_row <- function(df_anova, df, exp_name, protein) {
+  intensity_value <- df[df$Protein.IDs == protein, grep("^norm_", names(df),
+                                                        value = TRUE)]
+  for (v in intensity_value) {
+    row <-
+      data.frame(Protein.IDs = protein, experiment = exp_name, intensity = v)
+    df_anova <- rbind(df_anova, row)
+  }
+  return(df_anova)
+}
+
+df_anova <- data.frame()
+for (protein in data_comunes$Protein.IDs) {
+  df_anova <- add_intensity_row(df_anova, exp_1, "exp_1", protein)
+  df_anova <- add_intensity_row(df_anova, exp_2, "exp_2", protein)
+  df_anova <- add_intensity_row(df_anova, exp_4, "exp_4", protein)
+}
+```
+
+# Realiza el ANOVA y filtra las proteínas con p-valores > 0.05
+```{r}
+results <- list()
+
+# Aplica test ANOVA a los datos correspondientes a cada proteína
+for (protein in unique(df_anova$Protein.IDs)) {
+  protein_data <- subset(df_anova, Protein.IDs == protein)
+  model_aov <- aov(intensity ~ experiment, data = protein_data) 
+  results[[protein]] <- summary(model_aov)[[1]][["Pr(>F)"]][1]
+}
+
+# Convertir los resultados a un dataframe
+anova_results <- data.frame(Protein.IDs = names(results),
+                            p_value = unlist(results))
+
+# Filtrar proteínas con p-valor > 0.05
+consistent_proteins <- subset(anova_results, p_value > 0.05)
+
+consistent_proteins$Protein.IDs <- gsub("\\|", "",
+                                        consistent_proteins$Protein.IDs)
+```
+
+# Generar fasta y csv con las proteínas comunes ordenadas por p_valor
+```{r}
+# Cargar las librerías necesarias
+if (!requireNamespace("Biostrings", quietly = TRUE)) {
+  install.packages("BiocManager")
+  BiocManager::install("Biostrings")
+}
+library(Biostrings)
+
+# Leer base de datos de proteínas de A.Thaliana en formato fasta
+fasta_data <- readAAStringSet("../DATABASE_ARAPORT11.fasta")
+
+# Filtrar las secuencias
+seq_regex <- "([^\\|]*)\\|(.*)"
+fasta_ids <- sub(seq_regex, "\\1", names(fasta_data))
+filtered_seq <- fasta_data[fasta_ids %in% consistent_proteins$Protein.IDs]
+
+# Crear dataframe a partir de AAStringSet
+fasta_filtered_names <- sub(seq_regex, "\\1", names(filtered_seq))
+fasta_filtered_descr <- sub(seq_regex, "\\2", names(filtered_seq))
+df_fasta <- data.frame(
+  Protein.IDs = fasta_filtered_names,
+  Description = fasta_filtered_descr,
+  stringsAsFactors = FALSE
+)
+
+# Unir las columnas de las proteínas comunes entre los dos dataframes
+consistent_merged <- merge(consistent_proteins, df_fasta, by = "Protein.IDs")
+
+# Ordenar por p_value
+consistent_sorted <- consistent_merged[
+  rev(order(consistent_merged[["p_value"]])), ]
+
+# Escribir el nuevo archivo fasta
+writeXStringSet(filtered_seq,
+                filepath = "../datos finales/consistent_proteins.fasta")
+
+# Escribir el nuevo archivo csv
+write.csv2(consistent_sorted,
+           "../datos finales/consistent_proteins.csv", row.names = FALSE)
+```
+

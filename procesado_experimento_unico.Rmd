@@ -1,0 +1,328 @@
+---
+title: "Normalización y filtrado de cada dataset individual"
+output: html_notebook
+---
+
+# Cargar las librerías necesarias
+```{r}
+library(plyr)
+library(tidyverse)
+library(gplots)
+library(pheatmap)
+library(gridExtra)
+library(VennDiagram)
+library(ggseqlogo)
+library(grid)
+library(futile.logger)
+```
+
+# Inicializar valores
+```{r}
+# Introducir el número del dataset que se quiere procesar
+experiment = 4
+
+# Se define por cada experimento:
+#   - Nombre del archivo obtenido de MaxQuant.
+#   - Columnas con las intensidades de las muestras control.
+#   - Columnas con las intensidades de las muestras tratadas
+if (experiment == 1) {
+  filename <- "../Perseo/dataset1.txt"
+  cols_control <- c("mcherry")
+  cols_tratamientos <- c("RABF1", "RABF2b")
+} else if (experiment == 2) {
+  filename <- "../Perseo/dataset2.txt"
+  cols_control <- NULL
+  cols_tratamientos <- c("Intensity.dataset")
+} else if (experiment == 3) {
+  filename <- "../Perseo/dataset3.txt"
+  cols_control <- NULL
+  cols_tratamientos <- c("SIM.mock_1", "SIM.mock_2", "SIM.mock_3", "SIM.mock_4",
+                         "SIM.mock_5")
+} else if (experiment == 4) {
+  filename <- "../Perseo/dataset4.txt"
+  cols_control <- c("WT")
+  cols_tratamientos <- c("OE_11.4", "OE_6.4")
+}
+```
+
+# Importar datos
+```{r}
+data <- read.csv(filename, header=TRUE, sep="\t")
+```
+
+# Normalización por cuantiles: el objetivo es aplicar distribuciones a las
+# mismas propiedades estadísticas
+```{r}
+# Se define la función que se utilizará más adelante
+quantile_normalisation <- function(df){
+  
+  # Aplica la función rank en cada columna
+  df_rank <- map_df(df,rank,ties.method="average")
+  # Ordena las observaciones en cada columna de menor a mayor
+  df_sorted <- map_df(df,sort)
+  # Una vez ordenadas, encuentra la media de cada fila en cada columna
+  df_mean <- rowMeans(df_sorted)
+  
+  # Función para sustituir la media de los valores acorde al rango 
+  index_to_mean <- function(my_index, my_mean){
+    return(my_mean[my_index])
+  }
+  
+  # Reemplazar el valor de cada columna con la media de los valores acorde
+  # al rango 
+  df_final <- map_df(df_rank,index_to_mean, my_mean=df_mean)
+  
+  return(df_final)
+}
+```
+
+# Seleccionar las columnas de intensidad para normalizar
+```{r}
+data_tidy <- data %>% 
+  select(starts_with(c(cols_control, cols_tratamientos)))
+```
+
+# Aplicar la normalización por cuantiles con la función definida anteriormente
+```{r}
+data_norm <- data_tidy %>% 
+  quantile_normalisation()
+```
+
+# Volver a unir las columnas que no se normalizaron
+```{r}
+data_norm <- bind_cols(data[, !names(data) %in% names(data_tidy)], data_norm)
+```
+
+# Calcular media, mediana y desviación estandar para la intensidad de las
+# proteínas en cada muestra tratada
+```{r}
+# Cargar librerías necesarias
+library(dplyr)
+
+# Inicializar con los datos anteriores
+stats_df <- data_norm
+
+# Se añade las columnas de media, mediana y sd de cada muestra
+for (trat in cols_tratamientos) {
+  # Con value = TRUE, hacemos que grep devuelva nombres, no índices
+  cols_selected <- grep(paste0("^", trat), names(data_norm), value = TRUE)
+  
+  stats_df[[paste0("mean_", trat)]] <-
+    apply(data_norm[, cols_selected, drop = FALSE], 1, mean, na.rm = TRUE)
+  stats_df[[paste0("median_", trat)]] <-
+    apply(data_norm[, cols_selected, drop = FALSE], 1, median, na.rm = TRUE)
+  stats_df[[paste0("sd_", trat)]] <-
+    apply(data_norm[, cols_selected, drop = FALSE], 1, sd, na.rm = TRUE)
+}
+```
+
+# Seleccionar las columnas de medias y sd para calcular el coeficiente de 
+#variación (CV)
+```{r}
+cv_data_tydy <- stats_df %>% 
+  select(Protein.IDs, starts_with("mean_"), starts_with("sd_"))
+```
+
+# Separar filas de proteínas con IDs de varias isoformas
+```{r}
+# Cargar librería para utilizar función separate_rows
+library(tidyr)
+
+cv_data_splitted <- cv_data_tydy %>%
+  separate_rows(Protein.IDs, sep = ";")
+```
+
+**Violin plot de cada muestra**
+# Crear un nuevo dataframe con los CVs
+```{r}
+# Crear dataframe vacío
+cv_data <- data.frame(matrix(ncol = 0, nrow = nrow(cv_data_splitted)))
+
+cv_data[["Protein.IDs"]] <- cv_data_splitted[["Protein.IDs"]]
+
+# Se añade las columnas de media, mediana y sd de cada muestra
+for (trat in cols_tratamientos) {
+  cv_data[[paste0("CV_", trat)]] <-
+    (cv_data_splitted[[paste0("sd_", trat)]]
+    / cv_data_splitted[[paste0("mean_", trat)]]) * 100
+}
+```
+
+# Convertir el dataframe a formato largo (long format) para facilitar 
+# la creación del gráfico
+```{r}
+cv_data_long <- cv_data %>%
+  pivot_longer(cols = starts_with("CV_"), 
+               names_to = "Sample", 
+               values_to = "CV_value")
+```
+
+# Visualiar la distribución de cada dataset con gráfico interactivo Violin plot
+```{r}
+# Cargar las librerías necesarias
+library(ggplot2)
+library(plotly)
+
+# Crear el gráfico con tonos anaranjados más claros y puntos rojos
+muestras <- ggplot(cv_data_long, aes(x = Sample, y = CV_value, fill = Sample)) +
+  geom_violin(fill = "#FFD580", color = "#FF4500") +
+  geom_jitter(width = 0.1, color = "#FF0000", alpha = 0.5) +
+  labs(title = "Distribución de los Coeficientes de Variación (CV)",
+       x = "Muestra",
+       y = "CV (%)") +
+  theme_minimal()
+
+# Convertir a un gráfico interactivo con plotly
+muestras_interactivo <- ggplotly(muestras)
+
+# Mostrar el gráfico interactivo
+print(muestras_interactivo)
+
+```
+
+# Guardar el Violin plot de las muestras
+```{r}
+# Guardar el gráfico de ggplot2 como PNG con fondo transparente
+ggsave(paste0("../datos finales/violin_plots/violin_plot_muestras_dataset",
+              experiment, ".png"),
+       plot = muestras, width = 8, height = 6, dpi = 300, bg = "transparent")
+
+# Guardar el gráfico interactivo como un archivo HTML
+htmlwidgets::saveWidget(muestras_interactivo,
+                        paste0(
+                          "../datos finales/violin_plots/violin_interactivo_dataset",
+                          experiment, ".html"))
+```
+
+**Violin plot de experimento único**
+# Calcular media, mediana y desviación estandar para la intensidad de las
+# proteínas en cada muestra tratada
+```{r}
+# Cargar librerías necesarias
+library(dplyr)
+
+# Inicializar con los datos anteriores
+stats_df <- data_norm
+
+# Se añaden las columnas de media, mediana y sd de cada muestra
+for (trat in cols_tratamientos) {
+  # Con value = TRUE, hacemos que grep devuelva nombres, no índices
+  cols_selected <- grep(paste0("^", trat), names(data_norm), value = TRUE)
+  
+  stats_df[[paste0("mean_", trat)]] <-
+    apply(data_norm[, cols_selected, drop = FALSE], 1, mean, na.rm = TRUE)
+  stats_df[[paste0("median_", trat)]] <-
+    apply(data_norm[, cols_selected, drop = FALSE], 1, median, na.rm = TRUE)
+  stats_df[[paste0("sd_", trat)]] <-
+    apply(data_norm[, cols_selected, drop = FALSE], 1, sd, na.rm = TRUE)
+}
+```
+
+# Calcular media de los promedios obtenidos en cada proteína para cada muestra
+```{r}
+cols_mean <- grep("^mean_", names(stats_df), value = TRUE)
+
+# Se añade las columnas de mean_of_means y sd_of_means de las muestras
+stats_df_unico <- stats_df %>%
+  mutate(
+    mean_of_means = apply(select(., all_of(cols_mean)), 1, mean, na.rm = TRUE),
+    sd_of_means = apply(select(., all_of(cols_mean)), 1, sd, na.rm = TRUE)
+  )
+```
+
+# Seleccionar las columnas de medias y sd para calcular CV
+```{r}
+cv_unico <- stats_df_unico %>% 
+  select(Protein.IDs, starts_with("mean_of"), starts_with("sd_of"))
+```
+
+# Separar filas de proteínas con IDs de varias isoformas
+```{r}
+# Cargar librería para utilizar función separate_rows
+library(tidyr)
+
+cv_unico_splitted <- cv_unico %>%
+  separate_rows(Protein.IDs, sep = ";")
+```
+
+# Crear un nuevo dataframe con los CVs
+```{r}
+cv_data <- cv_unico_splitted %>%
+  rowwise() %>%  # Asegura que se calcule fila por fila
+  mutate(
+    CV_value = (sd_of_means / mean_of_means) * 100  # Calcular el CV como %
+  ) %>%
+  select(Protein.IDs, CV_value) %>%  # Mantener solo las columnas necesarias
+  ungroup()
+```
+
+#Grafico sin puntos
+```{r}
+# Cargar la librería necesaria
+library(ggplot2)
+
+# Crear el gráfico con el violín sin puntos
+dataset <- ggplot(cv_data, aes(x = "", y = CV_value)) +
+  geom_violin(fill = "#FFD580", color = "#FF4500") +  # Gráfico de violín
+  labs(title = "Distribución de los Coeficientes de Variación (CV)",
+       x = "Proteínas",
+       y = "CV (%)") +
+  theme_minimal() +
+  theme(axis.title.x = element_blank(),  # Eliminar el título del eje x
+        axis.text.x = element_blank(),     # Eliminar las etiquetas del eje x
+        axis.ticks.x = element_blank())    # Eliminar las marcas del eje x
+
+# Mostrar el gráfico
+print(dataset)
+
+```
+# Guardar el Violin plot del dataset
+```{r}
+# Guardar el gráfico de ggplot2 como PNG con fondo transparente
+ggsave(paste0("../datos finales/violin_plots/violin_plot_dataset",
+              experiment, ".png"),
+       plot = dataset, width = 8, height = 6, dpi = 300, bg = "transparent")
+
+```
+
+# Filtrar solo las proteínas con un sd <= 1
+```{r}
+filtered_sd_df <- stats_df_unico %>%
+  filter(., sd_of_means <= 1 | is.na(sd_of_means)) %>%
+  arrange(desc(mean_of_means)) %>%
+  select(., Protein.IDs, cols_mean, mean_of_means, sd_of_means)
+```
+
+# Separar filas de proteínas con IDs de varias isoformas
+```{r}
+# Cargar librería para utilizar función separate_rows
+library(tidyr)
+
+data_splitted <- filtered_sd_df %>%
+  separate_rows(Protein.IDs, sep = ";")
+```
+
+# Seleccionar columnas y exportar en csv
+```{r}
+date_to_save <- data_splitted[, c("Protein.IDs",
+                                  grep("^mean_", colnames(data_splitted),
+                                       value = TRUE)
+                                  )]
+
+# Formatear nombre archivo destino
+
+# Borrar extensión del nombre del archivo original
+filename_save <- gsub(filename, pattern="\\.[^\\.]*$", replacement="")
+# Mantener solo el nombre del archivo (sin ruta)
+filename_save <- gsub(filename_save, pattern="^.*/", replacement="")
+# Guardar en carpeta seleccionada con el sufijo "_mean" en formato csv
+filename_save <-
+  paste0("../resultados_analisis_individual/", filename_save, "_mean.csv")
+
+write.csv2(date_to_save, filename_save, row.names = FALSE)
+```
+
+
+
+
+

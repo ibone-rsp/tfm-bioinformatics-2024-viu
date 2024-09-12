@@ -1,0 +1,54 @@
+---
+title: "Comparar listas"
+output: html_notebook
+---
+
+# Cargar librería necesaria
+```{r}
+library(dplyr)
+```
+
+# Función para comparar listas y generar un archivo filtrado
+```{r}
+compare_lists <- function(database_file, dataset_file, output_path, output_filename) {
+  # Leer los archivos
+  database <- read.csv2(database_file, header = TRUE)
+  dataset <- read.csv2(dataset_file, header = TRUE)
+  
+  # Seleccionar entradas únicas basadas en la columna "Entry"
+  unique_database <- database %>%
+    distinct(Entry, .keep_all = TRUE)
+  
+  unique_dataset <- dataset %>%
+    distinct(Entry, .keep_all = TRUE)
+  
+  # Comparar las dos listas para obtener los valores comunes
+  common_entries <- inner_join(unique_database, unique_dataset, by = "Entry")
+  
+  # Seleccionar columnas de interés: "Entry" y "Protein names"
+  common_entries_filtered <- common_entries %>%
+    select(Entry, Protein.names = Protein.names.x)
+  
+  # Construir la ruta completa del archivo de salida
+  output_file <- file.path(output_path, output_filename)
+  
+  # Guardar el resultado en un nuevo archivo en la ruta especificada
+  write.csv(common_entries_filtered, file = output_file, row.names = FALSE)
+}
+```
+
+# Definir la ruta de salida
+```{r}
+output_path <- "../comparacion_listas_resultados/"
+database_file <- "../listas_comparar/database_bibliografia_uniportID.csv"
+dataset_file <- "../listas_comparar/dataset1,4_uniprot.csv"
+output_filename <- "dataset1,4_biblio_filtered.csv"
+```
+
+
+# Aplicar la función
+```{r}
+
+compare_lists(database_file, dataset_file, output_path, output_filename)
+```
+
